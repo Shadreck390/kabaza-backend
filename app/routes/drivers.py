@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
 from datetime import datetime, timedelta
+
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
@@ -10,39 +11,76 @@ from app.models.sql_models import Ride, Driver, RideStatus
 
 router = APIRouter()
 
+
+def _resolve_driver_by_identifier(db: Session, driver_identifier: str) -> Optional[Driver]:
+    """Match Driver row by user id, driver pk, phone, or legacy driver_id string."""
+    driver = None
+    if driver_identifier.isdigit():
+        n = int(driver_identifier)
+        driver = db.query(Driver).filter(Driver.user_id == n).first()
+        if not driver:
+            driver = db.query(Driver).filter(Driver.id == n).first()
+    if not driver:
+        driver = db.query(Driver).filter(Driver.phone == driver_identifier).first()
+    if not driver:
+        driver = db.query(Driver).filter(Driver.driver_id == driver_identifier).first()
+    return driver
+
+
+def _driver_matches_current_user(current_user: dict, driver: Driver) -> bool:
+    if current_user.get("role") == "admin":
+        return True
+    sub = current_user.get("sub")
+    if driver.user_id is not None:
+        return str(sub) == str(driver.user_id)
+    token_phone = current_user.get("phone")
+    return (
+        token_phone is not None
+        and driver.phone is not None
+        and str(token_phone) == str(driver.phone)
+    )
+
+
 # ============================================================================
 # DRIVER ACTIVE RIDE ENDPOINT (Fixes the 404 error)
 # ============================================================================
 
-@router.get("/{driver_id}/active-ride")
+@router.get("/{driver_identifier}/active-ride")
 async def get_driver_active_ride(
-    driver_id: str,
+    driver_identifier: str,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Get active ride for a driver.
-    Returns the ride if exists, otherwise returns null.
+    Accepts user id (numeric), driver table id, phone, or legacy driver_id string.
     """
-    # Security: Ensure user can only access their own data
-    if current_user.get("id") != driver_id and current_user.get("role") != "admin":
+    driver = _resolve_driver_by_identifier(db, driver_identifier)
+    if not driver:
+        return {
+            "activeRide": None,
+            "hasActiveRide": False,
+            "message": "Driver not found",
+        }
+
+    if not _driver_matches_current_user(current_user, driver):
         raise HTTPException(status_code=403, detail="Access denied")
-    
-    # Find active ride for this driver
+
     active_ride = db.query(Ride).filter(
         and_(
-            Ride.driver_id == driver_id,
-            Ride.status.in_([RideStatus.ACCEPTED, RideStatus.DRIVER_ARRIVED, RideStatus.ONGOING])
+            Ride.driver_id == driver.id,
+            Ride.status.in_(
+                [RideStatus.ACCEPTED, RideStatus.DRIVER_ARRIVED, RideStatus.ONGOING]
+            ),
         )
     ).first()
-    
+
     if not active_ride:
         return {
             "activeRide": None,
-            "message": "No active ride found"
+            "hasActiveRide": False,
         }
-    
-    # Return in format expected by frontend
+
     return {
         "activeRide": {
             "id": active_ride.ride_id,
@@ -55,7 +93,7 @@ async def get_driver_active_ride(
             "distance": active_ride.distance_km,
             "duration": active_ride.duration_minutes,
         },
-        "hasActiveRide": True
+        "hasActiveRide": True,
     }
 
 # ============================================================================

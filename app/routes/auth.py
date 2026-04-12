@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Body
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 import random
 import redis
 import os
@@ -500,6 +501,91 @@ async def get_current_user_info(current_user: dict = Depends(get_current_user)):
     return {
         "success": True,
         "user": current_user
+    }
+
+
+@router.post("/register")
+async def register_user(
+    registration_data: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Complete user profile registration after OTP verification
+
+    Expected payload:
+    {
+        "name": "Full Name",
+        "email": "user@example.com",
+        "profile_image": "optional_url",
+        "date_of_birth": "YYYY-MM-DD",
+        "gender": "M/F/Other"
+    }
+
+    Note: date_of_birth and gender are accepted for clients; the User model
+    currently persists name, email, profile_image, and verification status.
+    """
+    try:
+        user_id = int(current_user.get("sub"))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token subject",
+        )
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    new_email = registration_data.get("email")
+    if new_email and new_email != user.email:
+        taken = (
+            db.query(User)
+            .filter(User.email == new_email, User.id != user_id)
+            .first()
+        )
+        if taken:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email is already registered to another account",
+            )
+
+    if registration_data.get("name") is not None:
+        user.name = registration_data.get("name") or user.name
+    if new_email is not None:
+        user.email = new_email
+    user.is_verified = True
+
+    if registration_data.get("profile_image"):
+        user.profile_image = registration_data.get("profile_image")
+
+    try:
+        db.commit()
+        db.refresh(user)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not update profile (e.g. email already in use)",
+        )
+
+    logger.info(f"User profile updated: {user.id}")
+
+    return {
+        "success": True,
+        "message": "Profile updated successfully",
+        "user": {
+            "id": user.id,
+            "phone": user.phone,
+            "name": user.name,
+            "email": user.email,
+            "role": user.role,
+            "is_verified": user.is_verified,
+            "profile_image": user.profile_image,
+        },
     }
 
 
