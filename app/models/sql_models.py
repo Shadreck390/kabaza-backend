@@ -4,7 +4,8 @@ Combines all models with proper relationships
 Compatible with existing ride structure
 """
 
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, JSON, ForeignKey, Text, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Float, DateTime, Numeric, Boolean, JSON, ForeignKey, Text, Enum, Enum as SQLEnum
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -19,11 +20,9 @@ Base = declarative_base()
 # ============================================
 
 class RideStatus(str, enum.Enum):
-    """Ride status enum"""
     REQUESTED = "requested"
     ACCEPTED = "accepted"
-    DRIVER_ARRIVED = "driver_arrived"
-    ONGOING = "ongoing"
+    IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     CANCELLED_BY_RIDER = "cancelled_by_rider"
     CANCELLED_BY_DRIVER = "cancelled_by_driver"
@@ -177,7 +176,6 @@ class Driver(Base):
     user = relationship("User", back_populates="driver_profile", foreign_keys=[user_id])
     vehicles = relationship("Vehicle", back_populates="driver", cascade="all, delete-orphan")
     payouts = relationship("Payout", back_populates="driver", cascade="all, delete-orphan")
-    rides = relationship("Ride", back_populates="driver", foreign_keys="Ride.driver_id")
     
     def __repr__(self):
         return f"<Driver {self.full_name or self.phone}>"
@@ -271,7 +269,6 @@ class Rider(Base):
     favorite_locations = relationship("FavoriteLocation", back_populates="rider", cascade="all, delete-orphan")
     payment_methods = relationship("RiderPaymentMethod", back_populates="rider", cascade="all, delete-orphan")
     wallet_transactions = relationship("WalletTransaction", back_populates="rider", cascade="all, delete-orphan")
-    rides = relationship("Ride", back_populates="rider", foreign_keys="Ride.rider_id")
     
     def __repr__(self):
         return f"<Rider {self.full_name or self.phone}>"
@@ -282,85 +279,28 @@ class Rider(Base):
 # ============================================
 
 class Ride(Base):
-    """Ride model - extended with payment tracking"""
     __tablename__ = "rides"
-    
+
     id = Column(Integer, primary_key=True, index=True)
-    ride_id = Column(String(50), unique=True, index=True, nullable=False)
-    
-    # Participants (Foreign Keys)
-    rider_id = Column(Integer, ForeignKey("riders.id"), nullable=False)
-    driver_id = Column(Integer, ForeignKey("drivers.id"), nullable=True)
-    
-    # Names (denormalized for quick access)
-    rider_name = Column(String(100), nullable=True)
+    ride_id = Column(String(50), unique=True, nullable=False)
+    rider_id = Column(Integer, index=True)
+    rider_name = Column(String(100))
+    driver_id = Column(Integer, index=True, nullable=True)
     driver_name = Column(String(100), nullable=True)
-    
-    # Locations (stored as JSON)
-    pickup_location = Column(JSON, nullable=False)
-    destination = Column(JSON, nullable=False)
-    waypoints = Column(JSON, nullable=True)
-    
-    # Ride details
-    distance_km = Column(Float, default=0.0)
-    duration_minutes = Column(Float, default=0.0)
-    fare = Column(Float, default=0.0)
-    platform_fee = Column(Float, default=0.0)  # Kabaza commission
-    driver_earning = Column(Float, default=0.0)  # Amount driver receives
-    tip_amount = Column(Float, default=0.0)
-    
-    # Status
-    status = Column(SQLEnum(RideStatus), default=RideStatus.REQUESTED)
-    
-    # Timestamps
-    requested_at = Column(DateTime, default=datetime.utcnow)
-    accepted_at = Column(DateTime, nullable=True)
-    started_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
-    cancelled_at = Column(DateTime, nullable=True)
-    
-    # Driver location tracking
-    driver_current_location = Column(JSON, nullable=True)
-    last_location_update = Column(DateTime, nullable=True)
-    
-    # ============================================
-    # PAYMENT INFORMATION
-    # ============================================
-    payment_method = Column(String(30), default="cash")
-    payment_status = Column(SQLEnum(PaymentStatus), default=PaymentStatus.PENDING)
-    
-    # Mobile Money Payment Details
-    payment_provider = Column(String(20), nullable=True)  # tnm_mpamba, airtel_money
-    payment_phone = Column(String(20), nullable=True)
-    payment_transaction_id = Column(String(50), nullable=True)
-    payment_reference = Column(String(100), nullable=True)
-    payment_completed_at = Column(DateTime, nullable=True)
-    
-    # TNM Mpamba specific
-    tnm_mpamba_transaction_id = Column(String(50), nullable=True)
-    tnm_mpamba_status = Column(String(30), nullable=True)
-    
-    # Airtel Money specific
-    airtel_money_transaction_id = Column(String(50), nullable=True)
-    airtel_money_status = Column(String(30), nullable=True)
-    
-    # Metadata
+    pickup_location = Column(JSONB, nullable=False)
+    destination = Column(JSONB, nullable=False)
+    waypoints = Column(JSONB, default=list)
+    payment_method = Column(String(20), default="cash")
+    status = Column(String(30), default="requested")
+    fare = Column(Numeric(10, 2), default=0)
+    distance_km = Column(Numeric(10, 2), default=0)
+    duration_minutes = Column(Integer, default=0)
+    requested_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    accepted_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    cancellation_reason = Column(String, nullable=True)
     is_scheduled = Column(Boolean, default=False)
-    scheduled_for = Column(DateTime, nullable=True)
-    cancellation_reason = Column(String(255), nullable=True)
-    
-    # Rating
-    rating_given = Column(Integer, nullable=True)  # 1-5 stars
-    rating_comment = Column(Text, nullable=True)
-    rated_at = Column(DateTime, nullable=True)
-    
-    # Relationships
-    rider = relationship("Rider", back_populates="rides", foreign_keys=[rider_id])
-    driver = relationship("Driver", back_populates="rides", foreign_keys=[driver_id])
-    driver_earning_record = relationship("DriverEarning", back_populates="ride", uselist=False, cascade="all, delete-orphan")
-    
-    def __repr__(self):
-        return f"<Ride {self.ride_id} - {self.status}>"
+    scheduled_for = Column(DateTime(timezone=True), nullable=True)
 
 
 # ============================================
@@ -424,7 +364,6 @@ class DriverEarning(Base):
     
     # Relationships
     driver = relationship("Driver", foreign_keys=[driver_id])
-    ride = relationship("Ride", back_populates="driver_earning_record", foreign_keys=[ride_id])
     payout = relationship("Payout", foreign_keys=[payout_id])
 
 

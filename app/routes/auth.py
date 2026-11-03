@@ -349,11 +349,11 @@ async def verify_otp(
         
         user = User(
             phone=phone,
-            name=name or f"User_{phone[-4:]}",  # Default name if not provided
-            email=None,  # Can be updated later
-            password=random_password,  # Required field - will hash automatically if model has setter
+            full_name=name or f"User_{phone[-4:]}",  # Default name if not provided
+            #email=None,  # Can be updated later
+            #password=random_password,  # Required field - will hash automatically if model has setter
             role=role,
-            is_verified=True,
+            #is_verified=True,
             created_at=datetime.utcnow()
         )
         db.add(user)
@@ -370,8 +370,8 @@ async def verify_otp(
     # Check if profile needs completion
     requires_profile_completion = (
         is_new_user or 
-        not user.name or 
-        user.name.startswith("User_") or
+        not user.full_name or 
+        user.full_name.startswith("User_") or
         not user.email
     )
     
@@ -380,14 +380,14 @@ async def verify_otp(
         "id": user.id,
         "phone": user.phone,
         "role": user.role,
-        "name": user.name or ""
+        "name": user.full_name or ""
     })
     
     # Prepare user response
     user_response = {
         "id": user.id,
         "phone": user.phone,
-        "name": user.name,
+        "name": user.full_name,
         "email": user.email,
         "role": user.role,
         "is_verified": user.is_verified,
@@ -554,7 +554,7 @@ async def register_user(
             )
 
     if registration_data.get("name") is not None:
-        user.name = registration_data.get("name") or user.name
+        user.full_name = registration_data.get("name") or user.full_name
     if new_email is not None:
         user.email = new_email
     user.is_verified = True
@@ -580,10 +580,8 @@ async def register_user(
         "user": {
             "id": user.id,
             "phone": user.phone,
-            "name": user.name,
-            "email": user.email,
+            "name": user.full_name,
             "role": user.role,
-            "is_verified": user.is_verified,
             "profile_image": user.profile_image,
         },
     }

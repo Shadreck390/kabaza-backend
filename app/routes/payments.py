@@ -7,12 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from datetime import datetime
+import uuid
 
 from app.db.database import get_db
 from app.auth.jwt import get_current_user
 from app.services.payment_service import get_payment_service, PaymentService
 from app.models.sql_models import (
-    Rider, Driver, Ride, WalletTransaction, 
+    PayoutMethod, Rider, Driver, Ride, WalletTransaction,
     DriverEarning, Payout, RiderPaymentMethod
 )
 from app.schemas.ride import (
@@ -66,6 +67,265 @@ class PayoutHistoryResponse(BaseModel):
     reference_number: str
     created_at: datetime
     completed_at: Optional[datetime] = None
+
+
+class WalletCreditRequest(BaseModel):
+    amount: float = Field(..., gt=0, allow_inf_nan=False)
+
+
+class WalletPayoutRequest(BaseModel):
+    amount: float = Field(..., gt=0, allow_inf_nan=False)
+    method: str = Field(default="mobile_money", pattern="^(mobile_money|tnm_mpamba|airtel_money)$")
+
+
+wallet_router = APIRouter()
+
+
+def get_wallet_rider(current_user: dict, db: Session) -> Rider:
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    rider = db.query(Rider).filter(Rider.user_id == user_id).first()
+    if not rider:
+        raise HTTPException(status_code=404, detail="Rider profile not found")
+    return rider
+
+
+def get_wallet_driver(current_user: dict, db: Session) -> Driver:
+    if current_user.get("role") != "driver":
+        raise HTTPException(status_code=403, detail="Only drivers can access payouts")
+
+    user_id = current_user.get("sub") or current_user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    driver = db.query(Driver).filter(Driver.user_id == user_id).first()
+    if not driver:
+        raise HTTPException(status_code=404, detail="Driver profile not found")
+    return driver
+
+
+@wallet_router.get("")
+async def get_wallet(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get the user's wallet balance and recent transactions."""
+    if current_user.get("role") == "driver":
+        driver = get_wallet_driver(current_user, db)
+        payouts = (
+            db.query(Payout)
+            .filter(Payout.driver_id == driver.id)
+            .order_by(Payout.created_at.desc())
+            .limit(10)
+            .all()
+        )
+        return {
+            "balance": float(driver.available_balance or 0),
+            "total_earned": float(driver.total_earnings or 0),
+            "pending": float(driver.pending_balance or 0),
+            "currency": "MWK",
+            "is_driver": True,
+            "transactions": [
+                {
+                    "id": payout.id,
+                    "type": "debit",
+                    "amount": float(payout.amount),
+                    "description": f"Driver payout - {payout.reference_number}",
+                    "method": payout.payout_method.value,
+                    "status": payout.status,
+                    "timestamp": payout.created_at.isoformat() if payout.created_at else None,
+                }
+                for payout in payouts
+            ],
+        }
+
+    rider = get_wallet_rider(current_user, db)
+    transactions = (
+        db.query(WalletTransaction)
+        .filter(WalletTransaction.rider_id == rider.id)
+        .order_by(WalletTransaction.created_at.desc())
+        .limit(10)
+        .all()
+    )
+
+    transaction_list = [
+        {
+            "id": transaction.id,
+            "type": (
+                "credit"
+                if transaction.transaction_type in ("deposit", "refund")
+                else "debit"
+            ),
+            "amount": float(transaction.amount),
+            "description": transaction.description or "Wallet transaction",
+            "method": transaction.payment_method,
+            "status": transaction.status,
+            "timestamp": (
+                transaction.completed_at or transaction.created_at
+            ).isoformat()
+            if transaction.completed_at or transaction.created_at
+            else None,
+            "icon": (
+                "account-balance-wallet"
+                if transaction.transaction_type in ("deposit", "refund")
+                else "directions-car"
+            ),
+            "color": (
+                "#10B981"
+                if transaction.transaction_type in ("deposit", "refund")
+                else "#EF4444"
+            ),
+        }
+        for transaction in transactions
+    ]
+
+    return {
+        "balance": float(rider.wallet_balance or 0),
+        "total_earned": 0,
+        "pending": 0,
+        "currency": "MWK",
+        "transactions": transaction_list,
+    }
+
+
+@wallet_router.post("/topup")
+async def topup_wallet(
+    body: WalletCreditRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Add funds to the wallet using the development top-up flow."""
+    rider = get_wallet_rider(current_user, db)
+    amount = body.amount
+    balance_before = float(rider.wallet_balance or 0)
+    balance_after = balance_before + amount
+
+    rider.wallet_balance = balance_after
+    db.add(WalletTransaction(
+        rider_id=rider.id,
+        transaction_type="deposit",
+        amount=amount,
+        balance_before=balance_before,
+        balance_after=balance_after,
+        payment_method="wallet",
+        reference_type="topup",
+        description="Wallet top-up",
+        status="completed",
+        completed_at=datetime.utcnow(),
+    ))
+    db.commit()
+
+    return {"success": True, "message": f"Added MK {amount} to wallet"}
+
+
+@wallet_router.get("/payouts")
+async def get_wallet_payout_history(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get the driver's payout history."""
+    driver = get_wallet_driver(current_user, db)
+    payouts = (
+        db.query(Payout)
+        .filter(Payout.driver_id == driver.id)
+        .order_by(Payout.created_at.desc())
+        .limit(20)
+        .all()
+    )
+
+    return {
+        "payouts": [
+            {
+                "id": payout.id,
+                "amount": float(payout.amount),
+                "fee": float(payout.fee or 0),
+                "netAmount": float(payout.net_amount),
+                "method": payout.payout_method.value.replace("_", " ").title(),
+                "status": payout.status,
+                "reference": payout.reference_number,
+                "timestamp": payout.created_at.isoformat() if payout.created_at else None,
+            }
+            for payout in payouts
+        ]
+    }
+
+
+@wallet_router.post("/payout")
+async def request_wallet_payout(
+    body: WalletPayoutRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Request a withdrawal from the driver's available earnings."""
+    driver = get_wallet_driver(current_user, db)
+    if driver.verification_status != "verified":
+        raise HTTPException(status_code=403, detail="Driver must be verified to request payout")
+
+    amount = body.amount
+    if amount < 5000:
+        raise HTTPException(status_code=400, detail="Minimum withdrawal is MK 5,000")
+
+    driver = (
+        db.query(Driver)
+        .filter(Driver.id == driver.id)
+        .with_for_update()
+        .first()
+    )
+    if not driver:
+        raise HTTPException(status_code=404, detail="Driver profile not found")
+    if float(driver.available_balance or 0) < amount:
+        raise HTTPException(status_code=400, detail="Insufficient wallet balance")
+
+    if body.method == "mobile_money":
+        payout_method = driver.payout_method
+    else:
+        payout_method = body.method
+    if isinstance(payout_method, str):
+        try:
+            payout_method = PayoutMethod(payout_method)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Unsupported payout method")
+    if payout_method not in (PayoutMethod.TNM_MPAMBA, PayoutMethod.AIRTEL_MONEY):
+        raise HTTPException(status_code=400, detail="Unsupported payout method")
+
+    fee = round(max(amount * 0.01, 100))
+    net_amount = amount - fee
+    reference = f"PAYOUT-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
+
+    driver.available_balance -= amount
+    db.add(Payout(
+        driver_id=driver.id,
+        amount=amount,
+        fee=fee,
+        net_amount=net_amount,
+        payout_method=payout_method,
+        status="pending",
+        reference_number=reference,
+        tnm_mpamba_phone=driver.tnm_mpamba_phone if payout_method == PayoutMethod.TNM_MPAMBA else None,
+        airtel_money_phone=driver.airtel_money_phone if payout_method == PayoutMethod.AIRTEL_MONEY else None,
+    ))
+    db.commit()
+
+    return {
+        "success": True,
+        "reference": reference,
+        "amount": amount,
+        "fee": fee,
+        "net_amount": net_amount,
+        "message": f"Withdrawal of MK {amount:,.0f} submitted. Net MK {net_amount:,.0f}",
+    }
 
 
 # ============================================

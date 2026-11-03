@@ -2,13 +2,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.db.database import engine, Base
 from app.db.migrations import run_migrations
-from app.routes import auth, rides, drivers, payments, notifications
+from app.routes import auth, rides, drivers, payments, notifications, ratings, deliveries
 import logging
 import time
 
 
 # Run migrations FIRST (adds missing columns to existing tables)
-run_migrations()
+#run_migrations()
 
 # THEN create any new tables that don't exist
 Base.metadata.create_all(bind=engine)
@@ -56,8 +56,11 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(rides.router, prefix="/api/rides", tags=["Rides"])
 app.include_router(drivers.router, prefix="/api/drivers", tags=["Drivers"])
+app.include_router(deliveries.router, prefix="/api/deliveries", tags=["Deliveries"])
 app.include_router(payments.router, prefix="/api", tags=["Payments"])          # ✅ Added
+app.include_router(payments.wallet_router, prefix="/api/wallet", tags=["Wallet"])
 app.include_router(notifications.router, prefix="/api", tags=["Notifications"]) # ✅ Added
+app.include_router(ratings.router, prefix="/api/ratings", tags=["Ratings"])
 
 @app.get("/")
 def root():
